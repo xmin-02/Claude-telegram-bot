@@ -152,6 +152,11 @@ def send_text(text, parse_mode=None):
 
 
 def send_html(text):
+    # Route to current messenger if not Telegram (multi-platform bridge)
+    from messenger import get_current_messenger
+    m = get_current_messenger()
+    if m and m.platform_name != "telegram":
+        return m.send_html(text)
     result = send_text(text, parse_mode="HTML")
     if not result or not result.get("ok"):
         result = send_text(re.sub(r"<[^>]+>", "", text))
@@ -167,6 +172,11 @@ def delete_msg(msg_id):
 
 
 def send_long(header, body_md, footer=None):
+    # Route to current messenger if not Telegram (multi-platform bridge)
+    from messenger import get_current_messenger
+    m = get_current_messenger()
+    if m and m.platform_name != "telegram":
+        return m.send_long(header, body_md, footer=footer)
     html_body = md_to_telegram_html(body_md)
     chunks = split_message(html_body)
     total = len(chunks)
@@ -180,4 +190,9 @@ def send_long(header, body_md, footer=None):
 
 
 def send_typing():
+    # Route to current messenger if not Telegram (multi-platform bridge)
+    from messenger import get_current_messenger
+    m = get_current_messenger()
+    if m and m.platform_name != "telegram":
+        return m.send_typing()
     tg_api("sendChatAction", {"chat_id": CHAT_ID, "action": "typing"})

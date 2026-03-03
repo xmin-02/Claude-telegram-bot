@@ -26,6 +26,8 @@ from downloader import download_tg_file, build_file_prompt
 from ai import get_runner, RunnerCallbacks, format_time
 from sessions import get_session_model
 import cli_watcher
+from messenger.hub import MessengerHub
+from messenger.telegram import TelegramMessenger
 
 # commands/__init__.py auto-imports all subpackage modules via _auto_import()
 from commands import dispatch, dispatch_callback
@@ -33,6 +35,36 @@ from commands.session.session import (
     show_questions, handle_answer, handle_selection, _save_session_id,
 )
 from commands.usage.total_tokens import handle_token_input
+
+# ---------------------------------------------------------------------------
+# Messenger hub (multi-platform)
+# ---------------------------------------------------------------------------
+
+_hub = None  # type: MessengerHub | None
+
+
+def _broadcast_html(text):
+    """Send to all messengers if hub active, else just Telegram."""
+    if _hub:
+        _hub.broadcast(text)
+    else:
+        send_html(text)
+
+
+def _broadcast_long(header, body_md, footer=None):
+    """Send long message to all messengers."""
+    if _hub:
+        _hub.broadcast_long(header, body_md, footer=footer)
+    else:
+        send_long(header, body_md, footer=footer)
+
+
+def _broadcast_typing():
+    """Show typing on all messengers."""
+    if _hub:
+        _hub.broadcast_typing()
+    else:
+        send_typing()
 
 
 # ---------------------------------------------------------------------------
@@ -82,9 +114,11 @@ def _send_file_viewer_link(had_new_files):
         url = f"{state.file_viewer_url}?token={token}"
         count = len(set(e["path"] for e in state.modified_files))
         label = i18n.t("file_viewer.link", count=count)
+        link_html = f'<a href="{url}">{escape_html(label)}</a>'
+        # Telegram: send with msg_id tracking for deletion on next link
         result = tg_api("sendMessage", {
             "chat_id": CHAT_ID,
-            "text": f'<a href="{url}">{escape_html(label)}</a>',
+            "text": link_html,
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         })
@@ -93,6 +127,9 @@ def _send_file_viewer_link(had_new_files):
             state._viewer_msg_ids.append(msg_id)
         except (TypeError, KeyError):
             pass
+        # Send to other messengers (skip Telegram to avoid double-send)
+        if _hub:
+            _hub.broadcast_except("telegram", link_html)
         if state._file_server:
             state._file_server.update_files(state.modified_files)
         log.info("File viewer link sent (%d files)", count)
@@ -101,25 +138,25 @@ def _send_file_viewer_link(had_new_files):
 
 
 def _on_intermediate_text(text):
-    """Callback: send intermediate AI text to Telegram."""
+    """Callback: send intermediate AI text to all messengers."""
     from telegram import md_to_telegram_html, split_message
     html = md_to_telegram_html(text)
     chunks = split_message(html)
     for idx, chunk in enumerate(chunks):
-        send_html(f"\U0001f4ad {chunk}")
+        _broadcast_html(f"\U0001f4ad {chunk}")
         if idx < len(chunks) - 1:
             time.sleep(0.3)
 
 
 def _on_status(label, elapsed_secs):
-    """Callback: send status message to Telegram."""
+    """Callback: send status message to all messengers."""
     mins, secs = divmod(elapsed_secs, 60)
     t_str = format_time(mins, secs)
-    send_html(f"<i>{escape_html(label)} ({t_str})</i>")
+    _broadcast_html(f"<i>{escape_html(label)} ({t_str})</i>")
 
 
 def _on_cost(parsed):
-    """Callback: send cost info to Telegram."""
+    """Callback: send cost info to all messengers."""
     if not settings["show_cost"]:
         return
     dur_s = parsed.duration_ms / 1000 if parsed.duration_ms else 0
@@ -128,7 +165,7 @@ def _on_cost(parsed):
     cost_line = i18n.t("cost.line", cost=f"{parsed.cost_usd:.4f}", duration=dur_str,
                        turns=parsed.num_turns, in_tok=f"{parsed.tokens_in:,}",
                        out_tok=f"{parsed.tokens_out:,}")
-    send_html(f"<i>{cost_line}</i>")
+    _broadcast_html(f"<i>{cost_line}</i>")
 
 
 def _run_message(text):
@@ -159,7 +196,7 @@ def _run_message(text):
                     })
 
         threading.Thread(target=_typing_anim, daemon=True).start()
-        send_typing()
+        _broadcast_typing()
     sid = state.session_id
 
     def _run():
@@ -167,7 +204,7 @@ def _run_message(text):
             callbacks = RunnerCallbacks(
                 on_text=_on_intermediate_text,
                 on_status=_on_status,
-                on_typing=send_typing,
+                on_typing=_broadcast_typing,
                 on_cost=_on_cost,
                 on_file_link=_send_file_viewer_link,
             )
@@ -201,23 +238,23 @@ def _run_message(text):
                     header = provider_label
                     if active_sid:
                         header += f" [{active_sid[:8]}]"
-                    send_long(header, output, footer=footer)
+                    _broadcast_long(header, output, footer=footer)
                 return
 
             if not output:
-                send_html(f"<i>{i18n.t('error.empty_response')}</i>")
+                _broadcast_html(f"<i>{i18n.t('error.empty_response')}</i>")
                 return
 
             header = provider_label
             if active_sid:
                 header += f" [{active_sid[:8]}]"
-            send_long(header, output, footer=footer)
-            log.info("Response sent to Telegram")
+            _broadcast_long(header, output, footer=footer)
+            log.info("Response sent")
         except Exception as e:
             log.error("handle_message error: %s", e, exc_info=True)
             typing_stop.set()
             delete_msg(typing_id[0])
-            send_html(f"<i>{i18n.t('error.generic', msg=str(e))}</i>")
+            _broadcast_html(f"<i>{i18n.t('error.generic', msg=str(e))}</i>")
         finally:
             # Process next queued message, or release busy
             next_text = None
@@ -234,33 +271,114 @@ def _run_message(text):
 
 
 # ---------------------------------------------------------------------------
-# Update router
+# Hub message/callback handlers (platform-agnostic routing)
 # ---------------------------------------------------------------------------
 
+def _hub_message_handler(ctx):
+    """Route an incoming message from any messenger to the appropriate handler."""
+    text = ctx.text
+
+    # Route to connect flow if active
+    try:
+        from ai.connect import is_connect_active, handle_connect_response
+        if is_connect_active():
+            if not handle_connect_response(text):
+                ctx.reply(f"<i>{i18n.t('ai_connect.busy')}</i>")
+            return
+    except ImportError:
+        pass
+
+    log.info("[%s] Received: %s", ctx.platform, text[:100])
+
+    # Special state-based handlers
+    lower = text.lower()
+    if lower == "/cancel_connect":
+        state.waiting_token_input = False
+        ctx.reply(i18n.t("cancel.connect_cancelled"))
+        return
+
+    if state.waiting_token_input:
+        handle_token_input(text)
+        return
+
+    if state.answering:
+        handle_answer(text)
+        return
+
+    if state.selecting:
+        handle_selection(text)
+        return
+
+    # Command dispatch via registry
+    handler = dispatch(text)
+    if handler:
+        handler(text)
+        return
+
+    # Underscore → hyphen normalization for slash commands
+    if text.startswith("/") and "_" in text.split()[0]:
+        parts = text.split(maxsplit=1)
+        parts[0] = parts[0].replace("_", "-")
+        text = " ".join(parts)
+
+    # Default: send to AI
+    handle_message(text)
+
+
+def _hub_callback_handler(ctx):
+    """Route a button callback from any messenger."""
+    data = ctx.callback_data or ""
+
+    # Route connect: callbacks
+    if data.startswith("connect:"):
+        try:
+            from ai.connect import handle_connect_callback
+        except ImportError:
+            return
+        payload = data[len("connect:"):]
+        if handle_connect_callback(payload):
+            ctx.answer()
+        return
+
+    handler = dispatch_callback(data)
+    if handler:
+        handler(ctx.callback_id, ctx.msg_id, data)
+
+
+# Legacy update router (kept for backward compat, delegates to hub handlers)
 def process_update(update):
-    # --- Callback queries (inline keyboards) ---
+    from messenger import MessageContext, set_current_messenger
+    tg_m = _hub.get("telegram") if _hub else None
+
+    # --- Callback queries ---
     cb = update.get("callback_query")
     if cb:
         cb_chat = str(cb.get("message", {}).get("chat", {}).get("id", ""))
         if cb_chat != CHAT_ID:
             return
         data = cb.get("data", "")
-        # Route connect: callbacks to connect flow
-        if data.startswith("connect:"):
-            try:
-                from ai.connect import handle_connect_callback
-            except ImportError:
+        msg_id = str(cb.get("message", {}).get("message_id", ""))
+        cb_id = cb["id"]
+        if tg_m:
+            set_current_messenger(tg_m)
+            ctx = MessageContext(text="", platform="telegram", messenger=tg_m,
+                                hub=_hub, msg_id=msg_id, callback_id=cb_id,
+                                callback_data=data)
+            _hub_callback_handler(ctx)
+        else:
+            # Fallback: direct dispatch (no hub)
+            if data.startswith("connect:"):
+                try:
+                    from ai.connect import handle_connect_callback
+                except ImportError:
+                    return
+                payload = data[len("connect:"):]
+                if handle_connect_callback(payload):
+                    tg_api("answerCallbackQuery", {"callback_query_id": cb_id})
                 return
-            from telegram import tg_api as _tga
-            cb_id = cb["id"]
-            payload = data[len("connect:"):]
-            if handle_connect_callback(payload):
-                _tga("answerCallbackQuery", {"callback_query_id": cb_id})
-            return
-        handler = dispatch_callback(data)
-        if handler:
-            msg_id = cb.get("message", {}).get("message_id")
-            handler(cb["id"], msg_id, data)
+            handler = dispatch_callback(data)
+            if handler:
+                handler(cb_id, msg_id, data)
         return
 
     # --- Messages ---
@@ -304,41 +422,18 @@ def process_update(update):
     if not text:
         return
 
-    log.info("Received: %s", text[:100])
-    lower = text.lower()
-
-    # Special state-based handlers (before command dispatch)
-    if lower == "/cancel_connect":
-        state.waiting_token_input = False
-        send_html(i18n.t("cancel.connect_cancelled"))
-        return
-
-    if state.waiting_token_input:
-        handle_token_input(text)
-        return
-
-    if state.answering:
-        handle_answer(text)
-        return
-
-    if state.selecting:
-        handle_selection(text)
-        return
-
-    # Command dispatch via registry
-    handler = dispatch(text)
-    if handler:
-        handler(text)
-        return
-
-    # Underscore → hyphen normalization for slash commands (e.g. /code_review → /code-review)
-    if text.startswith("/") and "_" in text.split()[0]:
-        parts = text.split(maxsplit=1)
-        parts[0] = parts[0].replace("_", "-")
-        text = " ".join(parts)
-
-    # Default: send to AI
-    handle_message(text)
+    if tg_m and _hub:
+        set_current_messenger(tg_m)
+        ctx = MessageContext(text=text, platform="telegram", messenger=tg_m, hub=_hub)
+        _hub_message_handler(ctx)
+    else:
+        # Fallback: direct handling (no hub)
+        log.info("Received: %s", text[:100])
+        handler = dispatch(text)
+        if handler:
+            handler(text)
+            return
+        handle_message(text)
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +722,7 @@ def _stop_file_viewer():
 
 
 def poll_loop():
-    offset = 0
+    global _hub
     log.info("Bot started.")
 
     # Kill duplicate bot processes (Windows only; Unix uses lock file)
@@ -657,34 +752,40 @@ def poll_loop():
     state.global_tokens = get_monthly_tokens()
     log.info("Monthly tokens loaded: %d", state.global_tokens)
 
+    # --- Create messenger hub ---
+    _hub = MessengerHub()
+    _hub.set_message_handler(_hub_message_handler)
+    _hub.set_callback_handler(_hub_callback_handler)
+
+    # Telegram messenger
+    tg_messenger = TelegramMessenger()
+    _hub.add(tg_messenger)
+
+    # Discord messenger (if configured)
+    if config.DISCORD_TOKEN:
+        try:
+            from messenger.discord import DiscordMessenger
+            discord_m = DiscordMessenger()
+            _hub.add(discord_m)
+        except Exception as e:
+            log.warning("Discord init failed: %s", e)
+
+    # Startup messages (broadcast to all connected messengers)
     if killed > 0:
-        send_html(f"<b>{i18n.t('bot_duplicate', count=killed)}</b>")
+        _hub.broadcast(f"<b>{i18n.t('bot_duplicate', count=killed)}</b>")
     _prov = config.AI_MODELS.get(state.provider, {}).get("label", state.provider.title())
     _mdl = state.model or "default"
-    send_html(f"<b>{i18n.t('bot_started', provider=_prov, model=_mdl)}</b>")
+    _hub.broadcast(f"<b>{i18n.t('bot_started', provider=_prov, model=_mdl)}</b>")
 
-    while True:
-        try:
-            result = tg_api("getUpdates", {
-                "offset": offset,
-                "timeout": POLL_TIMEOUT,
-                "allowed_updates": json.dumps(["message", "callback_query"]),
-            })
-            if not result or not result.get("ok"):
-                log.warning("getUpdates failed")
-                time.sleep(5)
-                continue
-            for upd in result.get("result", []):
-                offset = upd["update_id"] + 1
-                try:
-                    process_update(upd)
-                except Exception as e:
-                    log.error("Update error: %s", e, exc_info=True)
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            log.error("Poll error: %s", e, exc_info=True)
-            time.sleep(5)
+    # Start all messengers (each runs polling in its own thread)
+    _hub.start_all()
+
+    # Main thread waits
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1124,6 +1225,8 @@ def main():
 
     def sig_handler(signum, frame):
         log.info("Signal %s, exiting.", signum)
+        if _hub:
+            _hub.stop_all()
         cli_watcher.stop()
         _stop_file_viewer()
         with state.lock:

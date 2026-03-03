@@ -57,6 +57,10 @@ LANG = _config.get("lang", "ko")
 GITHUB_REPO = _config.get("github_repo", "xmin-02/sumone")
 REMOTE_BOTS = _config.get("remote_bots", [])
 
+# Discord settings
+DISCORD_TOKEN = _config.get("discord_token", "")
+DISCORD_CHANNEL_ID = str(_config.get("discord_channel_id", ""))
+
 DEFAULT_SETTINGS = {
     "show_cost": False,
     "show_status": True,

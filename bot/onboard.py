@@ -61,6 +61,8 @@ _ONBOARD_I18N = {
         "auth_fail": "  ✗ {name} 인증 실패 — 봇에서 재시도 가능",
         "press_enter": "  Enter를 눌러 계속...",
         "min_one": "⚠ 최소 1개를 선택하세요",
+        "messenger": "메신저 선택",
+        "messenger_desc": "사용할 메신저 (Space 선택, 최소 1개)",
         "bot_token": "Telegram 봇 토큰",
         "bot_token_desc": "@BotFather에서 받은 토큰을 입력하세요",
         "bot_token_hint": "예: 123456789:ABCdefGhIjKlMnOpQrStUvWxYz",
@@ -71,6 +73,14 @@ _ONBOARD_I18N = {
         "chat_id_auto": "✓ 자동 감지됨: {chat_id}",
         "chat_id_manual": "자동 감지 실패 — 직접 입력하세요 (봇에게 /start 메시지를 보낸 후 재시도)",
         "chat_id_hint": "숫자만 입력 (예: 123456789)",
+        "discord_token": "Discord 봇 토큰",
+        "discord_token_desc": "Discord Developer Portal에서 받은 봇 토큰",
+        "discord_token_hint": "Developer Portal → Applications → Bot → Token",
+        "discord_token_invalid": "⚠ 유효하지 않은 토큰입니다. 다시 입력하세요.",
+        "discord_token_ok": "✓ Discord 봇 확인됨",
+        "discord_channel": "Discord 채널 ID",
+        "discord_channel_desc": "봇이 응답할 채널 ID (개발자 모드에서 채널 우클릭 → ID 복사)",
+        "discord_channel_hint": "숫자만 입력 (예: 1234567890123456789)",
         "auth_exists": "  ✓ {name} 이미 인증됨 — 건너뜀",
     },
     "en": {
@@ -106,6 +116,8 @@ _ONBOARD_I18N = {
         "auth_fail": "  ✗ {name} auth failed — can retry from bot",
         "press_enter": "  Press Enter to continue...",
         "min_one": "⚠ Select at least one",
+        "messenger": "Messenger",
+        "messenger_desc": "Messengers to use (Space to toggle, min 1)",
         "bot_token": "Telegram Bot Token",
         "bot_token_desc": "Enter the token from @BotFather",
         "bot_token_hint": "e.g. 123456789:ABCdefGhIjKlMnOpQrStUvWxYz",
@@ -116,6 +128,14 @@ _ONBOARD_I18N = {
         "chat_id_auto": "✓ Auto-detected: {chat_id}",
         "chat_id_manual": "Auto-detect failed — enter manually (send /start to the bot first, then retry)",
         "chat_id_hint": "Numbers only (e.g. 123456789)",
+        "discord_token": "Discord Bot Token",
+        "discord_token_desc": "Bot token from Discord Developer Portal",
+        "discord_token_hint": "Developer Portal → Applications → Bot → Token",
+        "discord_token_invalid": "⚠ Invalid token. Please try again.",
+        "discord_token_ok": "✓ Discord bot verified",
+        "discord_channel": "Discord Channel ID",
+        "discord_channel_desc": "Channel ID for the bot to respond in (Developer Mode → right-click channel → Copy ID)",
+        "discord_channel_hint": "Numbers only (e.g. 1234567890123456789)",
         "auth_exists": "  ✓ {name} already authenticated — skipping",
     },
 }
@@ -598,54 +618,119 @@ def _setup_providers(selected_keys, lang):
 # ---------------------------------------------------------------------------
 # Main onboarding flow
 # ---------------------------------------------------------------------------
+def _validate_discord_token(token):
+    """Validate Discord bot token via Discord API. Returns True or None."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            "https://discord.com/api/v10/users/@me",
+            headers={"Authorization": f"Bot {token}"},
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read())
+        if data.get("id"):
+            return True
+    except Exception:
+        pass
+    return None
+
+
 def run_onboarding(lang=None):
     """Run the interactive onboarding wizard. Returns the selected settings dict."""
     if not lang:
         lang = "ko"
 
-    total = 7  # max steps (adjusts based on conditions)
+    total = 9  # max steps (adjusts based on conditions)
     results = {}
     step = 1
 
-    # --- Step 1: Bot Token ---
-    def _check_token(token):
-        name = _validate_bot_token(token)
-        if name:
-            print(f"\n  {_t(lang, 'bot_token_ok').format(name=name)}")
-            import time; time.sleep(1)
-            return True
-        return None
-
-    bot_token = _text_input(lang, step, total,
-                            _t(lang, "bot_token"),
-                            _t(lang, "bot_token_desc"),
-                            hint=_t(lang, "bot_token_hint"),
-                            validate=_check_token,
-                            error_msg=_t(lang, "bot_token_invalid"))
-    results["bot_token"] = bot_token
+    # --- Step 1: Messenger selection ---
+    messenger_keys = ["telegram", "discord"]
+    messenger_labels = ["Telegram", "Discord"]
+    defaults = [True, False]  # Telegram pre-checked
+    sel_indices = _multi_select(lang, step, total,
+                                _t(lang, "messenger"),
+                                _t(lang, "messenger_desc"),
+                                messenger_labels, defaults=defaults)
+    selected_messengers = [messenger_keys[i] for i in sel_indices]
+    results["messengers"] = selected_messengers
     step += 1
 
-    # --- Step 2: Chat ID (auto-detect first) ---
-    detected_id = _detect_chat_id(bot_token)
-    if detected_id:
-        _clear_screen()
-        print(_header())
-        print(f"  {_t(lang, 'step')} {step}/{total}: {_t(lang, 'chat_id')}")
-        print(f"  {_t(lang, 'chat_id_desc')}\n")
-        print(f"  {_t(lang, 'chat_id_auto').format(chat_id=detected_id)}")
-        input(f"\n  {_t(lang, 'press_enter')}")
-        results["chat_id"] = detected_id
-    else:
-        chat_id = _text_input(lang, step, total,
-                              _t(lang, "chat_id"),
-                              _t(lang, "chat_id_manual"),
-                              hint=_t(lang, "chat_id_hint"),
-                              validate=lambda v: v if v.lstrip("-").isdigit() else None,
-                              error_msg=_t(lang, "chat_id_hint"))
-        results["chat_id"] = chat_id
-    step += 1
+    # Adjust total based on selections
+    if "telegram" not in selected_messengers:
+        total -= 2  # skip telegram token + chat_id
+    if "discord" not in selected_messengers:
+        total -= 2  # skip discord token + channel_id
 
-    # --- Step 3: Theme ---
+    # --- Telegram: Bot Token ---
+    if "telegram" in selected_messengers:
+        def _check_token(token):
+            name = _validate_bot_token(token)
+            if name:
+                print(f"\n  {_t(lang, 'bot_token_ok').format(name=name)}")
+                import time; time.sleep(1)
+                return True
+            return None
+
+        bot_token = _text_input(lang, step, total,
+                                _t(lang, "bot_token"),
+                                _t(lang, "bot_token_desc"),
+                                hint=_t(lang, "bot_token_hint"),
+                                validate=_check_token,
+                                error_msg=_t(lang, "bot_token_invalid"))
+        results["bot_token"] = bot_token
+        step += 1
+
+        # --- Telegram: Chat ID (auto-detect first) ---
+        detected_id = _detect_chat_id(bot_token)
+        if detected_id:
+            _clear_screen()
+            print(_header())
+            print(f"  {_t(lang, 'step')} {step}/{total}: {_t(lang, 'chat_id')}")
+            print(f"  {_t(lang, 'chat_id_desc')}\n")
+            print(f"  {_t(lang, 'chat_id_auto').format(chat_id=detected_id)}")
+            input(f"\n  {_t(lang, 'press_enter')}")
+            results["chat_id"] = detected_id
+        else:
+            chat_id = _text_input(lang, step, total,
+                                  _t(lang, "chat_id"),
+                                  _t(lang, "chat_id_manual"),
+                                  hint=_t(lang, "chat_id_hint"),
+                                  validate=lambda v: v if v.lstrip("-").isdigit() else None,
+                                  error_msg=_t(lang, "chat_id_hint"))
+            results["chat_id"] = chat_id
+        step += 1
+
+    # --- Discord: Bot Token ---
+    if "discord" in selected_messengers:
+        def _check_discord(token):
+            ok = _validate_discord_token(token)
+            if ok:
+                print(f"\n  {_t(lang, 'discord_token_ok')}")
+                import time; time.sleep(1)
+                return True
+            return None
+
+        discord_token = _text_input(lang, step, total,
+                                    _t(lang, "discord_token"),
+                                    _t(lang, "discord_token_desc"),
+                                    hint=_t(lang, "discord_token_hint"),
+                                    validate=_check_discord,
+                                    error_msg=_t(lang, "discord_token_invalid"))
+        results["discord_token"] = discord_token
+        step += 1
+
+        # --- Discord: Channel ID ---
+        discord_channel = _text_input(lang, step, total,
+                                      _t(lang, "discord_channel"),
+                                      _t(lang, "discord_channel_desc"),
+                                      hint=_t(lang, "discord_channel_hint"),
+                                      validate=lambda v: v if v.isdigit() else None,
+                                      error_msg=_t(lang, "discord_channel_hint"))
+        results["discord_channel_id"] = discord_channel
+        step += 1
+
+    # --- Theme ---
     theme_options = [_t(lang, "system"), _t(lang, "dark"), _t(lang, "light")]
     theme_values = ["system", "dark", "light"]
     idx = _select(lang, step, total,
@@ -726,8 +811,8 @@ def apply_onboarding(results):
     except (FileNotFoundError, json.JSONDecodeError):
         cfg = {}
 
-    # bot_token and chat_id must be top-level (config.py reads them there)
-    TOP_LEVEL_KEYS = {"bot_token", "chat_id"}
+    # These must be top-level (config.py reads them directly)
+    TOP_LEVEL_KEYS = {"bot_token", "chat_id", "discord_token", "discord_channel_id"}
     settings_data = {}
     for k, v in results.items():
         if k in TOP_LEVEL_KEYS:

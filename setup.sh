@@ -128,7 +128,7 @@ download_bot() {
     echo -e "  ${BOLD}[2/4] Downloading bot files...${NC}\n"
 
     # DDD directory structure
-    mkdir -p "$INSTALL_DIR/bot/i18n" "$INSTALL_DIR/bot/ai"
+    mkdir -p "$INSTALL_DIR/bot/i18n" "$INSTALL_DIR/bot/ai" "$INSTALL_DIR/bot/messenger"
     mkdir -p "$INSTALL_DIR/bot/commands/core" "$INSTALL_DIR/bot/commands/ai"
     mkdir -p "$INSTALL_DIR/bot/commands/file" "$INSTALL_DIR/bot/commands/session"
     mkdir -p "$INSTALL_DIR/bot/commands/usage" "$INSTALL_DIR/bot/commands/system"
@@ -152,6 +152,10 @@ download_bot() {
         "bot/ai/gemini.py:bot/ai/gemini.py"
         "bot/ai/connect.py:bot/ai/connect.py"
         "bot/cli_watcher.py:bot/cli_watcher.py"
+        "bot/messenger/__init__.py:bot/messenger/__init__.py"
+        "bot/messenger/hub.py:bot/messenger/hub.py"
+        "bot/messenger/telegram.py:bot/messenger/telegram.py"
+        "bot/messenger/discord.py:bot/messenger/discord.py"
         "bot/i18n/__init__.py:bot/i18n/__init__.py"
         "bot/i18n/ko.json:bot/i18n/ko.json"
         "bot/i18n/en.json:bot/i18n/en.json"
@@ -368,7 +372,7 @@ main() {
 
     print_banner
     echo -e "  ${GREEN}${BOLD}Setup complete!${NC}"
-    echo -e "  Send ${CYAN}/help${NC} in Telegram to get started.\n"
+    echo -e "  Send ${CYAN}/help${NC} in your messenger to get started.\n"
 }
 
 main "$@"

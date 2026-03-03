@@ -102,7 +102,7 @@ function Download-Bot {
     Write-Host "  [2/4] Downloading bot files...`n" -ForegroundColor White
 
     # DDD directory structure
-    foreach ($sub in @("bot", "bot\i18n", "bot\ai",
+    foreach ($sub in @("bot", "bot\i18n", "bot\ai", "bot\messenger",
                         "bot\commands", "bot\commands\core", "bot\commands\ai",
                         "bot\commands\file", "bot\commands\session",
                         "bot\commands\usage", "bot\commands\system",
@@ -124,6 +124,10 @@ function Download-Bot {
         @("bot/tunnel.py",                        "bot/tunnel.py"),
         @("bot/onboard.py",                       "bot/onboard.py"),
         @("bot/cli_watcher.py",                   "bot/cli_watcher.py"),
+        @("bot/messenger/__init__.py",            "bot/messenger/__init__.py"),
+        @("bot/messenger/hub.py",                 "bot/messenger/hub.py"),
+        @("bot/messenger/telegram.py",            "bot/messenger/telegram.py"),
+        @("bot/messenger/discord.py",             "bot/messenger/discord.py"),
         @("bot/ai/__init__.py",                   "bot/ai/__init__.py"),
         @("bot/ai/claude.py",                     "bot/ai/claude.py"),
         @("bot/ai/codex.py",                      "bot/ai/codex.py"),
@@ -319,7 +323,7 @@ function Main {
 
     Print-Banner
     Write-Host "  Setup complete!" -ForegroundColor Green
-    Write-Host "  Send /help in Telegram to get started.`n"
+    Write-Host "  Send /help in your messenger to get started.`n"
 }
 
 Main

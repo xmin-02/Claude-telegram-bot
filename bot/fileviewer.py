@@ -1648,6 +1648,7 @@ def _page_snapshot(snapshot_name, session_token):
 def _page_settings(session_token):
     """Generate the Settings web page with all configurable options."""
     from config import settings, DEFAULT_SETTINGS, TOKEN_PERIODS, THEME_OPTIONS, AI_MODELS, LANG, WORK_DIR
+    from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, BOT_TOKEN
     import json as _json
 
     theme_btn = '<button id="theme-toggle" class="outline-btn outline-btn--primary" onclick="toggleTheme()" title="Toggle theme">\u263D</button>'
@@ -1660,6 +1661,11 @@ def _page_settings(session_token):
     settings_json = _json.dumps(s)
     timeout_seconds = int(s.get("settings_timeout_minutes", 15)) * 60
     enabled = settings.get("enabled_providers", ["claude"])
+    # Messenger status
+    has_telegram = bool(BOT_TOKEN)
+    has_discord = bool(DISCORD_TOKEN)
+    discord_token_masked = (DISCORD_TOKEN[:8] + "..." + DISCORD_TOKEN[-4:]) if len(DISCORD_TOKEN) > 12 else ""
+    discord_channel_id = DISCORD_CHANNEL_ID
     filtered_models = {k: v for k, v in AI_MODELS.items() if k in enabled}
     ai_models_json = _json.dumps(filtered_models or AI_MODELS)
     cli_status_json = _json.dumps(state.cli_status)
@@ -1817,6 +1823,28 @@ def _page_settings(session_token):
 </div>
 
 <div class="settings-section">
+  <h2>\U0001f4ac <span data-i18n="s_messenger">Messenger</span></h2>
+  <div class="setting-row">
+    <div class="setting-label"><div class="name">Telegram</div><div class="desc" data-i18n="s_tg_d">Telegram Bot (configured via setup)</div></div>
+    <div class="setting-control"><span id="tg-status" style="font-size:var(--text-sm)"></span></div>
+  </div>
+  <div class="setting-row">
+    <div class="setting-label"><div class="name">Discord</div><div class="desc" data-i18n="s_dc_d">Discord Bot (token + channel ID)</div></div>
+    <div class="setting-control"><span id="dc-status" style="font-size:var(--text-sm)"></span></div>
+  </div>
+  <div id="dc-config" style="margin-top:8px">
+    <div class="setting-row">
+      <div class="setting-label"><div class="name" data-i18n="s_dc_token">Discord Token</div><div class="desc" data-i18n="s_dc_token_d">Bot token from Developer Portal</div></div>
+      <div class="setting-control"><input type="password" id="dc-token-input" class="setting-text" placeholder="Bot token" style="width:260px"></div>
+    </div>
+    <div class="setting-row">
+      <div class="setting-label"><div class="name" data-i18n="s_dc_channel">Channel ID</div><div class="desc" data-i18n="s_dc_channel_d">Discord channel for bot responses</div></div>
+      <div class="setting-control"><input type="text" id="dc-channel-input" class="setting-text" placeholder="1234567890123456789" style="width:200px"></div>
+    </div>
+  </div>
+</div>
+
+<div class="settings-section">
   <h2>\u2699\ufe0f <span data-i18n="s_system">System</span></h2>
   <div class="setting-row">
     <div class="setting-label"><div class="name" data-i18n="s_workdir">Work Directory</div><div class="desc" data-i18n="s_workdir_d">Root directory for file browsing</div></div>
@@ -1842,6 +1870,10 @@ var _tokenPeriods = {token_periods_json};
 var _themeOptions = {theme_options_json};
 var _sessionToken = '{session_token}';
 var _timeoutSecs = {timeout_seconds};
+var _hasTelegram = {'true' if has_telegram else 'false'};
+var _hasDiscord = {'true' if has_discord else 'false'};
+var _discordTokenMasked = '{discord_token_masked}';
+var _discordChannelId = '{discord_channel_id}';
 var _timerRemaining = _timeoutSecs;
 var _timerInterval = null;
 var _initialSettings = JSON.parse(JSON.stringify(_settings));
@@ -1930,6 +1962,15 @@ function initSettings() {{
   // Settings timeout
   var sti = document.getElementById('stimeout-input');
   if (sti) {{ sti.value = _settings.settings_timeout_minutes || 15; sti.addEventListener('change', markDirty); }}
+  // Messenger status
+  var tgSt = document.getElementById('tg-status');
+  if (tgSt) tgSt.innerHTML = _hasTelegram ? '<span style="color:#4caf50">\u2705 Connected</span>' : '<span style="color:#666">\u274c Not configured</span>';
+  var dcSt = document.getElementById('dc-status');
+  if (dcSt) dcSt.innerHTML = _hasDiscord ? '<span style="color:#4caf50">\u2705 Connected</span>' : '<span style="color:#666">\u274c Not configured</span>';
+  var dcTk = document.getElementById('dc-token-input');
+  if (dcTk) {{ dcTk.value = _discordTokenMasked; dcTk.addEventListener('change', markDirty); }}
+  var dcCh = document.getElementById('dc-channel-input');
+  if (dcCh) {{ dcCh.value = _discordChannelId; dcCh.addEventListener('change', markDirty); }}
 }}
 function _buildAiProviders() {{
   var container = document.getElementById('ai-providers');
@@ -2045,6 +2086,11 @@ function gatherSettings() {{
   if (wdi) {{ _putIfChanged(s, 'work_dir', wdi.value.trim()); }}
   var sti = document.getElementById('stimeout-input');
   if (sti) {{ _putIfChanged(s, 'settings_timeout_minutes', parseInt(sti.value) || 15); }}
+  // Discord settings (only if user entered a new token, not the masked one)
+  var dcTk = document.getElementById('dc-token-input');
+  if (dcTk && dcTk.value && dcTk.value !== _discordTokenMasked) {{ s.discord_token = dcTk.value.trim(); }}
+  var dcCh = document.getElementById('dc-channel-input');
+  if (dcCh && dcCh.value && dcCh.value !== _discordChannelId) {{ s.discord_channel_id = dcCh.value.trim(); }}
   return s;
 }}
 function saveSettings() {{
@@ -2576,6 +2622,15 @@ class _ViewerHandler(BaseHTTPRequestHandler):
                         # Clear session so Claude starts fresh in the new work directory
                         update_config("session_id", None)
                         from state import state as _st2; _st2.session_id = None
+                # Handle Discord settings (top-level config keys)
+                if "discord_token" in new_settings:
+                    _dc_token = new_settings.pop("discord_token")
+                    update_config("discord_token", _dc_token)
+                    import config as _cfg_dc; _cfg_dc.DISCORD_TOKEN = _dc_token
+                if "discord_channel_id" in new_settings:
+                    _dc_ch = new_settings.pop("discord_channel_id")
+                    update_config("discord_channel_id", _dc_ch)
+                    import config as _cfg_dc2; _cfg_dc2.DISCORD_CHANNEL_ID = _dc_ch
                 # Apply default model only when user explicitly changed model in this page session.
                 model_dirty = bool(new_settings.pop("_model_dirty", False))
                 if not model_dirty:
